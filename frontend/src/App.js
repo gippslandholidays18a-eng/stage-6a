@@ -1,6 +1,10 @@
 import "@/App.css";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { AuthProvider } from "@/context/AuthContext";
+import ProtectedRoute from "@/components/ProtectedRoute";
 import Layout from "@/components/Layout";
+import Login from "@/pages/Login";
+import AdminUsers from "@/pages/AdminUsers";
 import AnalyticsDashboard from "@/pages/AnalyticsDashboard";
 import Import from "@/pages/Import";
 import Reservations from "@/pages/Reservations";
@@ -20,24 +24,39 @@ function App() {
   return (
     <div className="App">
       <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<Layout />}>
-            <Route index element={<AnalyticsDashboard />} />
-            <Route path="reservations" element={<Reservations />} />
-            <Route path="import" element={<Import />} />
-            <Route path="properties" element={<Properties />} />
-            <Route path="history" element={<History />} />
-            <Route path="segments" element={<Segments />} />
-            <Route path="guests/:id" element={<GuestProfile />} />
-            <Route path="cancellations" element={<Cancellations />} />
-            <Route path="scores" element={<Scores />} />
-            <Route path="reports" element={<Reports />} />
-            <Route path="settings/commissions" element={<CommissionSettings />} />
-            <Route path="settings/digest" element={<DigestSettings />} />
-            <Route path="settings/offers" element={<OffersSettings />} />
-            <Route path="campaigns" element={<Campaigns />} />
-          </Route>
-        </Routes>
+        <AuthProvider>
+          <Routes>
+            {/* Public */}
+            <Route path="/login" element={<Login />} />
+
+            {/* Authenticated routes (any role) */}
+            <Route element={<ProtectedRoute />}>
+              <Route path="/" element={<Layout />}>
+                <Route index element={<AnalyticsDashboard />} />
+                <Route path="reservations" element={<Reservations />} />
+                <Route path="import" element={<Import />} />
+                <Route path="properties" element={<Properties />} />
+                <Route path="history" element={<History />} />
+                <Route path="segments" element={<Segments />} />
+                <Route path="guests/:id" element={<GuestProfile />} />
+                <Route path="cancellations" element={<Cancellations />} />
+                <Route path="scores" element={<Scores />} />
+                <Route path="reports" element={<Reports />} />
+                <Route path="campaigns" element={<Campaigns />} />
+
+                {/* Admin-only nested routes */}
+                <Route element={<ProtectedRoute roles={["admin"]} />}>
+                  <Route path="settings/commissions" element={<CommissionSettings />} />
+                  <Route path="settings/digest" element={<DigestSettings />} />
+                  <Route path="settings/offers" element={<OffersSettings />} />
+                  <Route path="admin/users" element={<AdminUsers />} />
+                </Route>
+              </Route>
+            </Route>
+
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </AuthProvider>
       </BrowserRouter>
     </div>
   );

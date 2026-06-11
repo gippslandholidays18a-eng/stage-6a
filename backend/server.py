@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, UploadFile, File, HTTPException, Query
+from fastapi import FastAPI, APIRouter, UploadFile, File, HTTPException, Query, Depends
 from fastapi.responses import PlainTextResponse
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -68,6 +68,10 @@ from campaign_service import (
     get_content_overrides,
     set_content_for,
     growth_tracker,
+)
+from auth_service import (
+    hash_password, verify_password, issue_token, safe_user,
+    seed_admin, make_auth_deps, ROLES,
 )
 
 ROOT_DIR = Path(__file__).parent
@@ -1377,8 +1381,6 @@ async def settings_campaign_content_put(key: str, payload: ContentPayload):
 # Wire up
 # ---------------------------------------------------------------------------
 
-app.include_router(api)
-
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
@@ -1395,8 +1397,147 @@ async def startup_seed():
         await ensure_digest_settings(db)
         await ensure_campaign_settings(db)
         await seed_managed_properties(db)
+        await seed_admin(db)
+        await db.users.create_index("email", unique=True)
     except Exception as e:
         logger.exception("startup seed failed: %s", e)
+
+
+# Build auth dependencies bound to this db
+current_user_dep, require_role_dep = make_auth_deps(db)
+
+
+# --- Stage 6A — Auth + users ------------------------------------------------
+
+class LoginPayload(BaseModel):
+    email: str
+    password: str
+
+
+class UserCreate(BaseModel):
+    name: str
+    email: str
+    password: str
+    role: str  # admin | manager | staff
+    assigned_properties: Optional[List[str]] = []
+    active: Optional[bool] = True
+
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    role: Optional[str] = None
+    password: Optional[str] = None
+    assigned_properties: Optional[List[str]] = None
+    active: Optional[bool] = None
+
+
+@api.post("/auth/login")
+async def auth_login(payload: LoginPayload):
+    email = (payload.email or "").strip().lower()
+    user = await db.users.find_one({"email": email})
+    if not user or not user.get("active"):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    if not verify_password(payload.password, user.get("password_hash", "")):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    user["_id"] = None  # avoid leaking
+    token = issue_token(user)
+    return {"token": token, "user": safe_user(user)}
+
+
+@api.get("/auth/me")
+async def auth_me(user: Dict[str, Any] = Depends(current_user_dep)):
+    return user
+
+
+@api.post("/auth/logout")
+async def auth_logout():
+    # Stateless tokens — frontend discards the token. Endpoint exists for symmetry.
+    return {"ok": True}
+
+
+@api.get("/users")
+async def users_list(_: Dict[str, Any] = Depends(require_role_dep("admin"))):
+    cursor = db.users.find({}, {"_id": 0, "password_hash": 0}).sort("created_at", -1)
+    items = await cursor.to_list(length=500)
+    return {"items": items}
+
+
+@api.post("/users")
+async def users_create(
+    payload: UserCreate,
+    _: Dict[str, Any] = Depends(require_role_dep("admin")),
+):
+    if payload.role not in ROLES:
+        raise HTTPException(status_code=400, detail="Invalid role")
+    email = payload.email.strip().lower()
+    if not email or "@" not in email:
+        raise HTTPException(status_code=400, detail="Valid email required")
+    if len(payload.password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+    existing = await db.users.find_one({"email": email})
+    if existing:
+        raise HTTPException(status_code=409, detail="Email already in use")
+    doc = {
+        "id": str(uuid.uuid4()),
+        "name": payload.name.strip(),
+        "email": email,
+        "password_hash": hash_password(payload.password),
+        "role": payload.role,
+        "assigned_properties": payload.assigned_properties or [],
+        "active": True if payload.active is None else payload.active,
+        "created_at": _now_iso(),
+    }
+    await db.users.insert_one(doc.copy())
+    return safe_user(doc)
+
+
+@api.put("/users/{uid}")
+async def users_update(
+    uid: str,
+    payload: UserUpdate,
+    actor: Dict[str, Any] = Depends(require_role_dep("admin")),
+):
+    user = await db.users.find_one({"id": uid})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    patch: Dict[str, Any] = {}
+    data = payload.model_dump()
+    if data.get("name") is not None:
+        patch["name"] = data["name"].strip()
+    if data.get("role") is not None:
+        if data["role"] not in ROLES:
+            raise HTTPException(status_code=400, detail="Invalid role")
+        # Don't allow an admin to demote themselves
+        if user["id"] == actor["id"] and data["role"] != "admin":
+            raise HTTPException(status_code=400, detail="You cannot demote your own admin account")
+        patch["role"] = data["role"]
+    if data.get("password"):
+        if len(data["password"]) < 6:
+            raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
+        patch["password_hash"] = hash_password(data["password"])
+    if data.get("assigned_properties") is not None:
+        patch["assigned_properties"] = data["assigned_properties"]
+    if data.get("active") is not None:
+        if user["id"] == actor["id"] and not data["active"]:
+            raise HTTPException(status_code=400, detail="You cannot deactivate your own account")
+        patch["active"] = bool(data["active"])
+    if patch:
+        await db.users.update_one({"id": uid}, {"$set": patch})
+    doc = await db.users.find_one({"id": uid}, {"_id": 0, "password_hash": 0})
+    return doc
+
+
+@api.delete("/users/{uid}")
+async def users_delete(
+    uid: str,
+    actor: Dict[str, Any] = Depends(require_role_dep("admin")),
+):
+    if uid == actor["id"]:
+        raise HTTPException(status_code=400, detail="You cannot delete your own account")
+    res = await db.users.delete_one({"id": uid})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"deleted": True}
 
 
 MANAGED_PROPERTIES = [
@@ -1450,3 +1591,8 @@ async def seed_managed_properties(db):
 @app.on_event("shutdown")
 async def shutdown_db_client():
     client.close()
+
+
+# Mount the API router at the very end so all endpoints (incl. Stage 6A auth) are registered
+app.include_router(api)
+
