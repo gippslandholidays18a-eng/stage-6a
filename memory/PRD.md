@@ -29,9 +29,13 @@ porting plan documented at handoff.
 | 4 | ✅ 2026-02 | Full analytics dashboard (5 sections), 7 exportable reports, date+property filters |
 | 4.5 | ✅ 2026-02 | Weekly digest via Resend — webhook-triggered, configurable recipients/schedule, trend notes, click-through links, "no new data" skip |
 | 5 | ✅ 2026-02 | Campaign engine — 13 audiences across 3 tabs, configurable offer library (12 defaults), content recommendations, direct booking growth tracker, audience CSV exports |
-| 6 | Backlog | Tasks system (cancellation recovery workflows) |
+| 6A | ✅ 2026-02 | Auth foundation — self-hosted JWT + bcrypt, three roles (admin/manager/staff), /login page, /admin/users CRUD, role-based sidebar, session restore via /api/auth/me, seed admin (`admin@sourcebench.local`) |
+| 6B | P0 Next | Property model extension + Task management (`/tasks`, categories, staff assignment, browser-image-compression) |
+| 6C | P0 | Compliance & Housekeeping schedules per property — auto-update on linked task completion |
+| 6D | P1 | Apartment inventory tracker (default stock limits seeded per property) |
+| 6E | P1 | Guest review tracker — manual entry, CSV import, analytics, priority flags, linked to `/guests/{id}` |
 | 7 | Backlog | Staff calendar |
-| ∞ | Backlog | Auth + multi-user, PMS sync (Guesty/Hospitable/Hostaway), Postgres/Vercel port |
+| ∞ | Backlog | PMS-agnostic inbox + webhook receiver (Guesty/Hospitable/Hostaway), Postgres/Vercel port |
 
 ## Architecture
 ### Backend (`/app/backend/`)
