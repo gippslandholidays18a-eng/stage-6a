@@ -1,7 +1,7 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, Upload, Table2, Building2, History, Users, AlertTriangle,
-  Sparkles, Settings, FileDown, Mail, Megaphone, Tag, Shield, LogOut,
+  Sparkles, Settings, FileDown, Mail, Megaphone, Tag, Shield, LogOut, CheckSquare,
 } from "lucide-react";
 import { Toaster } from "sonner";
 import { useAuth, hasRole } from "@/context/AuthContext";
@@ -9,6 +9,7 @@ import { useAuth, hasRole } from "@/context/AuthContext";
 // Each item declares which roles may see it.
 const NAV = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, testid: "nav-dashboard", end: true, roles: ["admin", "manager", "staff"] },
+  { to: "/tasks", label: "Tasks", icon: CheckSquare, testid: "nav-tasks", roles: ["admin", "manager", "staff"] },
   { to: "/reservations", label: "Reservations", icon: Table2, testid: "nav-reservations", roles: ["admin", "manager"] },
   { to: "/segments", label: "Segments", icon: Users, testid: "nav-segments", roles: ["admin", "manager"] },
   { to: "/scores", label: "Scores", icon: Sparkles, testid: "nav-scores", roles: ["admin", "manager"] },

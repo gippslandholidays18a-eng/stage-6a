@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { toast } from "sonner";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import {
   Select,
@@ -10,7 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Trash2, Plus, Building2, Pencil, Save, X } from "lucide-react";
+import { Trash2, Plus, Building2, Pencil, Save, X, ChevronDown, ChevronRight } from "lucide-react";
 
 const TYPES = ["Apartment", "House", "Townhouse", "Studio", "Villa", "Cabin", "Other"];
 
@@ -24,10 +25,23 @@ const BLANK = {
   bathrooms: "",
   active: true,
   notes: "",
+  address: "",
+  key_collection_notes: "",
+  wifi_name: "",
+  wifi_password: "",
+  parking_notes: "",
+  smart_lock_code: "",
+  cleaner_user_id: "",
+  manager_user_id: "",
+  max_occupancy: "",
+  checkin_time: "15:00",
+  checkout_time: "10:00",
+  ota_listings: { airbnb_url: "", booking_url: "", stayz_url: "", vrbo_url: "", expedia_url: "" },
 };
 
 export default function Properties() {
   const [items, setItems] = useState([]);
+  const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [version, setVersion] = useState(0);
   const [draft, setDraft] = useState(null);
@@ -36,9 +50,13 @@ export default function Properties() {
 
   useEffect(() => {
     let cancelled = false;
-    api.get("/properties").then((r) => {
+    Promise.all([
+      api.get("/properties"),
+      api.get("/users/assignable").catch(() => ({ data: { items: [] } })),
+    ]).then(([p, u]) => {
       if (cancelled) return;
-      setItems(r.data.items || []);
+      setItems(p.data.items || []);
+      setUsers(u.data.items || []);
       setLoading(false);
     });
     return () => { cancelled = true; };
@@ -46,18 +64,22 @@ export default function Properties() {
 
   const refresh = useCallback(() => setVersion((v) => v + 1), []);
 
+  const buildPayload = (d) => ({
+    ...d,
+    bedrooms: d.bedrooms === "" ? null : parseInt(d.bedrooms),
+    bathrooms: d.bathrooms === "" ? null : parseInt(d.bathrooms),
+    max_occupancy: d.max_occupancy === "" ? null : parseInt(d.max_occupancy),
+    cleaner_user_id: d.cleaner_user_id || null,
+    manager_user_id: d.manager_user_id || null,
+  });
+
   const createOne = async () => {
     if (!draft.name.trim()) {
       toast.error("Display name is required");
       return;
     }
     try {
-      const payload = {
-        ...draft,
-        bedrooms: draft.bedrooms === "" ? null : parseInt(draft.bedrooms),
-        bathrooms: draft.bathrooms === "" ? null : parseInt(draft.bathrooms),
-      };
-      await api.post("/properties", payload);
+      await api.post("/properties", buildPayload(draft));
       toast.success("Property added");
       setDraft(null);
       refresh();
@@ -78,17 +100,30 @@ export default function Properties() {
       bathrooms: p.bathrooms ?? "",
       active: p.active !== false,
       notes: p.notes || "",
+      address: p.address || "",
+      key_collection_notes: p.key_collection_notes || "",
+      wifi_name: p.wifi_name || "",
+      wifi_password: p.wifi_password || "",
+      parking_notes: p.parking_notes || "",
+      smart_lock_code: p.smart_lock_code || "",
+      cleaner_user_id: p.cleaner_user_id || "",
+      manager_user_id: p.manager_user_id || "",
+      max_occupancy: p.max_occupancy ?? "",
+      checkin_time: p.checkin_time || "15:00",
+      checkout_time: p.checkout_time || "10:00",
+      ota_listings: {
+        airbnb_url: p.ota_listings?.airbnb_url || "",
+        booking_url: p.ota_listings?.booking_url || "",
+        stayz_url: p.ota_listings?.stayz_url || "",
+        vrbo_url: p.ota_listings?.vrbo_url || "",
+        expedia_url: p.ota_listings?.expedia_url || "",
+      },
     });
   };
 
   const saveEdit = async (id) => {
     try {
-      const payload = {
-        ...editDraft,
-        bedrooms: editDraft.bedrooms === "" ? null : parseInt(editDraft.bedrooms),
-        bathrooms: editDraft.bathrooms === "" ? null : parseInt(editDraft.bathrooms),
-      };
-      await api.put(`/properties/${id}`, payload);
+      await api.put(`/properties/${id}`, buildPayload(editDraft));
       toast.success("Property updated");
       setEditingId(null);
       setEditDraft(null);
@@ -150,6 +185,7 @@ export default function Properties() {
         <PropertyEditor
           draft={draft}
           setDraft={setDraft}
+          users={users}
           onSave={createOne}
           onCancel={() => setDraft(null)}
           mode="create"
@@ -182,6 +218,7 @@ export default function Properties() {
                         <PropertyEditor
                           draft={editDraft}
                           setDraft={setEditDraft}
+                          users={users}
                           onSave={() => saveEdit(p.id)}
                           onCancel={() => { setEditingId(null); setEditDraft(null); }}
                           mode="edit"
@@ -234,8 +271,11 @@ export default function Properties() {
   );
 }
 
-function PropertyEditor({ draft, setDraft, onSave, onCancel, mode }) {
+function PropertyEditor({ draft, setDraft, users, onSave, onCancel, mode }) {
   const set = (patch) => setDraft({ ...draft, ...patch });
+  const setOta = (patch) => setDraft({ ...draft, ota_listings: { ...(draft.ota_listings || {}), ...patch } });
+  const [showAccess, setShowAccess] = useState(mode === "edit");
+  const [showListings, setShowListings] = useState(false);
   return (
     <div className="surface rounded-md p-5 space-y-3" data-testid={`property-editor-${mode}`}>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -287,27 +327,37 @@ function PropertyEditor({ draft, setDraft, onSave, onCancel, mode }) {
             </SelectContent>
           </Select>
         </div>
-        <div>
-          <label className="text-[10px] uppercase tracking-[0.15em] text-dim">Bedrooms</label>
-          <Input
-            type="number"
-            min="0"
-            value={draft.bedrooms}
-            onChange={(e) => set({ bedrooms: e.target.value })}
-            data-testid="prop-bedrooms"
-            className="mt-1 bg-transparent border-[#22252F]"
-          />
-        </div>
-        <div>
-          <label className="text-[10px] uppercase tracking-[0.15em] text-dim">Bathrooms</label>
-          <Input
-            type="number"
-            min="0"
-            value={draft.bathrooms}
-            onChange={(e) => set({ bathrooms: e.target.value })}
-            data-testid="prop-bathrooms"
-            className="mt-1 bg-transparent border-[#22252F]"
-          />
+        <div className="grid grid-cols-3 gap-2">
+          <div>
+            <label className="text-[10px] uppercase tracking-[0.15em] text-dim">Bedrooms</label>
+            <Input
+              type="number" min="0"
+              value={draft.bedrooms}
+              onChange={(e) => set({ bedrooms: e.target.value })}
+              data-testid="prop-bedrooms"
+              className="mt-1 bg-transparent border-[#22252F]"
+            />
+          </div>
+          <div>
+            <label className="text-[10px] uppercase tracking-[0.15em] text-dim">Bathrooms</label>
+            <Input
+              type="number" min="0"
+              value={draft.bathrooms}
+              onChange={(e) => set({ bathrooms: e.target.value })}
+              data-testid="prop-bathrooms"
+              className="mt-1 bg-transparent border-[#22252F]"
+            />
+          </div>
+          <div>
+            <label className="text-[10px] uppercase tracking-[0.15em] text-dim">Max occupancy</label>
+            <Input
+              type="number" min="1"
+              value={draft.max_occupancy}
+              onChange={(e) => set({ max_occupancy: e.target.value })}
+              data-testid="prop-max-occupancy"
+              className="mt-1 bg-transparent border-[#22252F]"
+            />
+          </div>
         </div>
         <div className="sm:col-span-2">
           <label className="text-[10px] uppercase tracking-[0.15em] text-dim">Notes</label>
@@ -327,6 +377,166 @@ function PropertyEditor({ draft, setDraft, onSave, onCancel, mode }) {
           <span className="text-sm text-white">{draft.active ? "Active" : "Inactive"}</span>
         </div>
       </div>
+
+      {/* Access & operations */}
+      <div className="border-t divider pt-3">
+        <button
+          onClick={() => setShowAccess((s) => !s)}
+          data-testid="prop-toggle-access"
+          className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-[0.18em] text-dim hover:text-white"
+        >
+          {showAccess ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+          Access &amp; operations
+        </button>
+        {showAccess && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3" data-testid="prop-access-section">
+            <div className="sm:col-span-2">
+              <label className="text-[10px] uppercase tracking-[0.15em] text-dim">Address</label>
+              <Input
+                value={draft.address}
+                onChange={(e) => set({ address: e.target.value })}
+                data-testid="prop-address"
+                className="mt-1 bg-transparent border-[#22252F]"
+              />
+            </div>
+            <div className="sm:col-span-2">
+              <label className="text-[10px] uppercase tracking-[0.15em] text-dim">Key collection notes</label>
+              <Textarea
+                value={draft.key_collection_notes}
+                onChange={(e) => set({ key_collection_notes: e.target.value })}
+                data-testid="prop-key-notes"
+                rows={2}
+                className="mt-1 bg-transparent border-[#22252F]"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] uppercase tracking-[0.15em] text-dim">Wifi name</label>
+              <Input
+                value={draft.wifi_name}
+                onChange={(e) => set({ wifi_name: e.target.value })}
+                data-testid="prop-wifi-name"
+                className="mt-1 bg-transparent border-[#22252F]"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] uppercase tracking-[0.15em] text-dim">Wifi password</label>
+              <Input
+                value={draft.wifi_password}
+                onChange={(e) => set({ wifi_password: e.target.value })}
+                data-testid="prop-wifi-password"
+                className="mt-1 bg-transparent border-[#22252F] font-mono"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] uppercase tracking-[0.15em] text-dim">Smart-lock code</label>
+              <Input
+                value={draft.smart_lock_code}
+                onChange={(e) => set({ smart_lock_code: e.target.value })}
+                data-testid="prop-lock-code"
+                className="mt-1 bg-transparent border-[#22252F] font-mono"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] uppercase tracking-[0.15em] text-dim">Parking notes</label>
+              <Input
+                value={draft.parking_notes}
+                onChange={(e) => set({ parking_notes: e.target.value })}
+                data-testid="prop-parking"
+                className="mt-1 bg-transparent border-[#22252F]"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] uppercase tracking-[0.15em] text-dim">Check-in time</label>
+              <Input
+                type="time"
+                value={draft.checkin_time}
+                onChange={(e) => set({ checkin_time: e.target.value })}
+                data-testid="prop-checkin"
+                className="mt-1 bg-transparent border-[#22252F]"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] uppercase tracking-[0.15em] text-dim">Check-out time</label>
+              <Input
+                type="time"
+                value={draft.checkout_time}
+                onChange={(e) => set({ checkout_time: e.target.value })}
+                data-testid="prop-checkout"
+                className="mt-1 bg-transparent border-[#22252F]"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] uppercase tracking-[0.15em] text-dim">Default cleaner</label>
+              <Select
+                value={draft.cleaner_user_id || "__none__"}
+                onValueChange={(v) => set({ cleaner_user_id: v === "__none__" ? "" : v })}
+              >
+                <SelectTrigger data-testid="prop-cleaner" className="mt-1 bg-transparent border-[#22252F]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="bg-[#12141A] border-[#22252F] text-white">
+                  <SelectItem value="__none__">— None —</SelectItem>
+                  {(users || []).map((u) => (
+                    <SelectItem key={u.id} value={u.id}>{u.name || u.email} · {u.role}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <label className="text-[10px] uppercase tracking-[0.15em] text-dim">Owner / manager</label>
+              <Select
+                value={draft.manager_user_id || "__none__"}
+                onValueChange={(v) => set({ manager_user_id: v === "__none__" ? "" : v })}
+              >
+                <SelectTrigger data-testid="prop-manager" className="mt-1 bg-transparent border-[#22252F]">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="bg-[#12141A] border-[#22252F] text-white">
+                  <SelectItem value="__none__">— None —</SelectItem>
+                  {(users || []).map((u) => (
+                    <SelectItem key={u.id} value={u.id}>{u.name || u.email} · {u.role}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* OTA listings */}
+      <div className="border-t divider pt-3">
+        <button
+          onClick={() => setShowListings((s) => !s)}
+          data-testid="prop-toggle-listings"
+          className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-[0.18em] text-dim hover:text-white"
+        >
+          {showListings ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+          OTA listings
+        </button>
+        {showListings && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3" data-testid="prop-listings-section">
+            {[
+              ["airbnb_url", "Airbnb URL"],
+              ["booking_url", "Booking.com URL"],
+              ["stayz_url", "Stayz URL"],
+              ["vrbo_url", "VRBO URL"],
+              ["expedia_url", "Expedia URL"],
+            ].map(([k, label]) => (
+              <div key={k}>
+                <label className="text-[10px] uppercase tracking-[0.15em] text-dim">{label}</label>
+                <Input
+                  type="url"
+                  value={(draft.ota_listings || {})[k] || ""}
+                  onChange={(e) => setOta({ [k]: e.target.value })}
+                  data-testid={`prop-${k.replace("_url", "")}`}
+                  className="mt-1 bg-transparent border-[#22252F]"
+                />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
       <div className="flex justify-end gap-2 pt-2">
         <button
           onClick={onCancel}

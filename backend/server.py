@@ -73,6 +73,20 @@ from auth_service import (
     hash_password, verify_password, issue_token, safe_user,
     seed_admin, make_auth_deps, ROLES,
 )
+from task_service import (
+    CATEGORIES as TASK_CATEGORIES,
+    CATEGORY_LABELS as TASK_CATEGORY_LABELS,
+    STATUSES as TASK_STATUSES,
+    STATUS_LABELS as TASK_STATUS_LABELS,
+    PRIORITIES as TASK_PRIORITIES,
+    PRIORITY_LABELS as TASK_PRIORITY_LABELS,
+    visibility_filter as task_visibility_filter,
+    can_modify_task, can_update_status, can_view_task,
+    build_task_doc, build_photo, build_checklist_item, build_comment,
+    summarize as task_summarize,
+    now_iso as task_now_iso,
+    new_id as task_new_id,
+)
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -333,6 +347,15 @@ class SourceOverridePayload(BaseModel):
     classified_source: str
 
 
+class OtaListings(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    airbnb_url: Optional[str] = ""
+    booking_url: Optional[str] = ""
+    stayz_url: Optional[str] = ""
+    vrbo_url: Optional[str] = ""
+    expedia_url: Optional[str] = ""
+
+
 class PropertyCreate(BaseModel):
     name: str
     property_name: Optional[str] = ""
@@ -343,6 +366,19 @@ class PropertyCreate(BaseModel):
     bathrooms: Optional[int] = None
     active: Optional[bool] = True
     notes: Optional[str] = ""
+    # Stage 6B — Access & operations
+    address: Optional[str] = ""
+    key_collection_notes: Optional[str] = ""
+    wifi_name: Optional[str] = ""
+    wifi_password: Optional[str] = ""
+    parking_notes: Optional[str] = ""
+    smart_lock_code: Optional[str] = ""
+    cleaner_user_id: Optional[str] = None
+    manager_user_id: Optional[str] = None
+    max_occupancy: Optional[int] = None
+    checkin_time: Optional[str] = ""
+    checkout_time: Optional[str] = ""
+    ota_listings: Optional[OtaListings] = None
 
 
 class PropertyUpdate(BaseModel):
@@ -355,6 +391,18 @@ class PropertyUpdate(BaseModel):
     bathrooms: Optional[int] = None
     active: Optional[bool] = None
     notes: Optional[str] = None
+    address: Optional[str] = None
+    key_collection_notes: Optional[str] = None
+    wifi_name: Optional[str] = None
+    wifi_password: Optional[str] = None
+    parking_notes: Optional[str] = None
+    smart_lock_code: Optional[str] = None
+    cleaner_user_id: Optional[str] = None
+    manager_user_id: Optional[str] = None
+    max_occupancy: Optional[int] = None
+    checkin_time: Optional[str] = None
+    checkout_time: Optional[str] = None
+    ota_listings: Optional[OtaListings] = None
 
 
 class Property(BaseModel):
@@ -369,6 +417,18 @@ class Property(BaseModel):
     bathrooms: Optional[int] = None
     active: bool = True
     notes: str = ""
+    address: str = ""
+    key_collection_notes: str = ""
+    wifi_name: str = ""
+    wifi_password: str = ""
+    parking_notes: str = ""
+    smart_lock_code: str = ""
+    cleaner_user_id: Optional[str] = None
+    manager_user_id: Optional[str] = None
+    max_occupancy: Optional[int] = None
+    checkin_time: str = ""
+    checkout_time: str = ""
+    ota_listings: Optional[OtaListings] = None
     created_at: str
 
 
@@ -625,6 +685,20 @@ async def create_property(payload: PropertyCreate):
         "bathrooms": payload.bathrooms,
         "active": True if payload.active is None else payload.active,
         "notes": payload.notes or "",
+        "address": payload.address or "",
+        "key_collection_notes": payload.key_collection_notes or "",
+        "wifi_name": payload.wifi_name or "",
+        "wifi_password": payload.wifi_password or "",
+        "parking_notes": payload.parking_notes or "",
+        "smart_lock_code": payload.smart_lock_code or "",
+        "cleaner_user_id": payload.cleaner_user_id,
+        "manager_user_id": payload.manager_user_id,
+        "max_occupancy": payload.max_occupancy,
+        "checkin_time": payload.checkin_time or "",
+        "checkout_time": payload.checkout_time or "",
+        "ota_listings": payload.ota_listings.model_dump() if payload.ota_listings else {
+            "airbnb_url": "", "booking_url": "", "stayz_url": "", "vrbo_url": "", "expedia_url": ""
+        },
         "created_at": _now_iso(),
     }
     await db.properties.insert_one(doc.copy())
@@ -1399,6 +1473,10 @@ async def startup_seed():
         await seed_managed_properties(db)
         await seed_admin(db)
         await db.users.create_index("email", unique=True)
+        await db.tasks.create_index([("created_at", -1)])
+        await db.tasks.create_index("property_id")
+        await db.tasks.create_index("assignee_id")
+        await db.tasks.create_index("status")
     except Exception as e:
         logger.exception("startup seed failed: %s", e)
 
@@ -1538,6 +1616,391 @@ async def users_delete(
     if res.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Not found")
     return {"deleted": True}
+
+
+@api.get("/users/assignable")
+async def users_assignable(_: Dict[str, Any] = Depends(current_user_dep)):
+    """Lightweight directory used by Tasks/Properties assignment selects."""
+    cursor = db.users.find(
+        {"active": True},
+        {"_id": 0, "id": 1, "name": 1, "email": 1, "role": 1},
+    ).sort("name", 1)
+    items = await cursor.to_list(length=500)
+    return {"items": items}
+
+
+# --- Stage 6B — Tasks --------------------------------------------------------
+
+class TaskCreate(BaseModel):
+    title: str
+    description: Optional[str] = ""
+    category: str
+    priority: Optional[str] = "medium"
+    status: Optional[str] = "open"
+    due_date: Optional[str] = None  # YYYY-MM-DD
+    property_id: Optional[str] = None
+    assignee_id: Optional[str] = None
+    checklist: Optional[List[str]] = None
+
+
+class TaskUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    priority: Optional[str] = None
+    status: Optional[str] = None
+    due_date: Optional[str] = None
+    property_id: Optional[str] = None
+    assignee_id: Optional[str] = None
+
+
+class PhotoCreate(BaseModel):
+    data_url: str
+    label: Optional[str] = ""
+
+
+class ChecklistCreate(BaseModel):
+    text: str
+
+
+class ChecklistUpdate(BaseModel):
+    done: Optional[bool] = None
+    text: Optional[str] = None
+
+
+class CommentCreate(BaseModel):
+    body: str
+
+
+async def _resolve_property(pid: Optional[str]) -> tuple[Optional[str], str]:
+    if not pid:
+        return None, ""
+    p = await db.properties.find_one({"id": pid}, {"_id": 0, "id": 1, "name": 1})
+    if not p:
+        raise HTTPException(status_code=400, detail="Unknown property")
+    return p["id"], p.get("name", "")
+
+
+async def _resolve_assignee(uid: Optional[str]) -> tuple[Optional[str], str]:
+    if not uid:
+        return None, ""
+    u = await db.users.find_one({"id": uid, "active": True}, {"_id": 0, "id": 1, "name": 1, "email": 1})
+    if not u:
+        raise HTTPException(status_code=400, detail="Unknown or inactive assignee")
+    return u["id"], u.get("name") or u.get("email", "")
+
+
+async def _load_task(tid: str, user: Dict[str, Any]) -> Dict[str, Any]:
+    t = await db.tasks.find_one({"id": tid}, {"_id": 0})
+    if not t:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not can_view_task(user, t):
+        raise HTTPException(status_code=403, detail="Not allowed to view this task")
+    return t
+
+
+@api.get("/tasks/meta")
+async def tasks_meta(_: Dict[str, Any] = Depends(current_user_dep)):
+    return {
+        "categories": [{"key": k, "label": TASK_CATEGORY_LABELS[k]} for k in TASK_CATEGORIES],
+        "statuses": [{"key": k, "label": TASK_STATUS_LABELS[k]} for k in TASK_STATUSES],
+        "priorities": [{"key": k, "label": TASK_PRIORITY_LABELS[k]} for k in TASK_PRIORITIES],
+    }
+
+
+@api.get("/tasks/stats")
+async def tasks_stats(user: Dict[str, Any] = Depends(current_user_dep)):
+    q = task_visibility_filter(user)
+    cursor = db.tasks.find(q, {"_id": 0})
+    items = await cursor.to_list(length=5000)
+    stats = task_summarize(items)
+    mine = [t for t in items if t.get("assignee_id") == user.get("id")]
+    stats["mine_open"] = sum(1 for t in mine if t.get("status") != "done")
+    return stats
+
+
+@api.get("/tasks")
+async def tasks_list(
+    status: Optional[str] = None,
+    category: Optional[str] = None,
+    priority: Optional[str] = None,
+    assignee_id: Optional[str] = None,
+    property_id: Optional[str] = None,
+    mine: Optional[bool] = False,
+    user: Dict[str, Any] = Depends(current_user_dep),
+):
+    q: Dict[str, Any] = {}
+    base = task_visibility_filter(user)
+    if base:
+        q.update(base)
+    if status:
+        q["status"] = status
+    if category:
+        q["category"] = category
+    if priority:
+        q["priority"] = priority
+    if assignee_id:
+        q["assignee_id"] = assignee_id
+    if property_id:
+        q["property_id"] = property_id
+    if mine:
+        q["assignee_id"] = user.get("id")
+    cursor = db.tasks.find(q, {"_id": 0}).sort("created_at", -1)
+    items = await cursor.to_list(length=2000)
+    # Strip photo data_urls from list responses — they're heavy. Keep counts.
+    for t in items:
+        photos = t.get("photos") or []
+        t["photo_count"] = len(photos)
+        t["photos"] = [{"id": p["id"], "label": p.get("label", "")} for p in photos]
+    return {"items": items}
+
+
+@api.post("/tasks")
+async def tasks_create(
+    payload: TaskCreate,
+    actor: Dict[str, Any] = Depends(require_role_dep("admin", "manager")),
+):
+    if not payload.title.strip():
+        raise HTTPException(status_code=400, detail="Title is required")
+    if payload.category not in TASK_CATEGORIES:
+        raise HTTPException(status_code=400, detail="Invalid category")
+    if payload.priority and payload.priority not in TASK_PRIORITIES:
+        raise HTTPException(status_code=400, detail="Invalid priority")
+    if payload.status and payload.status not in TASK_STATUSES:
+        raise HTTPException(status_code=400, detail="Invalid status")
+    prop_id, prop_name = await _resolve_property(payload.property_id)
+    ass_id, ass_name = await _resolve_assignee(payload.assignee_id)
+    doc = build_task_doc(
+        title=payload.title,
+        description=payload.description or "",
+        category=payload.category,
+        priority=payload.priority or "medium",
+        status=payload.status or "open",
+        due_date=payload.due_date,
+        property_id=prop_id,
+        property_name=prop_name,
+        assignee_id=ass_id,
+        assignee_name=ass_name,
+        created_by=actor["id"],
+        created_by_name=actor.get("name") or actor.get("email", ""),
+        checklist_items=payload.checklist or [],
+    )
+    await db.tasks.insert_one(doc.copy())
+    doc.pop("_id", None)
+    return doc
+
+
+@api.get("/tasks/{tid}")
+async def tasks_get(tid: str, user: Dict[str, Any] = Depends(current_user_dep)):
+    return await _load_task(tid, user)
+
+
+@api.put("/tasks/{tid}")
+async def tasks_update(
+    tid: str,
+    payload: TaskUpdate,
+    user: Dict[str, Any] = Depends(current_user_dep),
+):
+    task = await _load_task(tid, user)
+    data = payload.model_dump(exclude_unset=True)
+
+    # Staff can only flip status on their own task; nothing else.
+    if not can_modify_task(user, task):
+        only_status = set(data.keys()) <= {"status"}
+        if not only_status:
+            raise HTTPException(status_code=403, detail="Only admin/manager can edit task fields")
+        if not can_update_status(user, task):
+            raise HTTPException(status_code=403, detail="You can only update tasks assigned to you")
+
+    patch: Dict[str, Any] = {}
+    if "title" in data and data["title"] is not None:
+        if not data["title"].strip():
+            raise HTTPException(status_code=400, detail="Title is required")
+        patch["title"] = data["title"].strip()
+    if "description" in data and data["description"] is not None:
+        patch["description"] = data["description"].strip()
+    if "category" in data and data["category"]:
+        if data["category"] not in TASK_CATEGORIES:
+            raise HTTPException(status_code=400, detail="Invalid category")
+        patch["category"] = data["category"]
+    if "priority" in data and data["priority"]:
+        if data["priority"] not in TASK_PRIORITIES:
+            raise HTTPException(status_code=400, detail="Invalid priority")
+        patch["priority"] = data["priority"]
+    if "status" in data and data["status"]:
+        if data["status"] not in TASK_STATUSES:
+            raise HTTPException(status_code=400, detail="Invalid status")
+        patch["status"] = data["status"]
+        if data["status"] == "done":
+            patch["completed_at"] = task_now_iso()
+            patch["completed_by"] = user["id"]
+            patch["completed_by_name"] = user.get("name") or user.get("email", "")
+        else:
+            patch["completed_at"] = None
+            patch["completed_by"] = None
+            patch["completed_by_name"] = None
+    if "due_date" in data:
+        patch["due_date"] = data["due_date"] or None
+    if "property_id" in data:
+        pid, pname = await _resolve_property(data["property_id"])
+        patch["property_id"] = pid
+        patch["property_name"] = pname
+    if "assignee_id" in data:
+        aid, aname = await _resolve_assignee(data["assignee_id"])
+        patch["assignee_id"] = aid
+        patch["assignee_name"] = aname
+
+    patch["updated_at"] = task_now_iso()
+    await db.tasks.update_one({"id": tid}, {"$set": patch})
+    doc = await db.tasks.find_one({"id": tid}, {"_id": 0})
+    return doc
+
+
+@api.delete("/tasks/{tid}")
+async def tasks_delete(
+    tid: str,
+    _: Dict[str, Any] = Depends(require_role_dep("admin", "manager")),
+):
+    res = await db.tasks.delete_one({"id": tid})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Not found")
+    return {"deleted": True}
+
+
+# Photos
+
+@api.post("/tasks/{tid}/photos")
+async def task_photo_add(
+    tid: str,
+    payload: PhotoCreate,
+    user: Dict[str, Any] = Depends(current_user_dep),
+):
+    task = await _load_task(tid, user)
+    if not (can_modify_task(user, task) or task.get("assignee_id") == user.get("id")):
+        raise HTTPException(status_code=403, detail="Only the assignee or admin/manager can attach photos")
+    if not payload.data_url.startswith("data:image/"):
+        raise HTTPException(status_code=400, detail="Photo must be a base64 image data URL")
+    # Soft cap: 1.5 MB per image, 12 photos per task.
+    if len(payload.data_url) > 1_600_000:
+        raise HTTPException(status_code=413, detail="Image too large after compression — try a smaller photo")
+    if len(task.get("photos") or []) >= 12:
+        raise HTTPException(status_code=400, detail="Maximum 12 photos per task")
+    photo = build_photo(data_url=payload.data_url, label=payload.label or "", user=user)
+    await db.tasks.update_one(
+        {"id": tid},
+        {"$push": {"photos": photo}, "$set": {"updated_at": task_now_iso()}},
+    )
+    return photo
+
+
+@api.delete("/tasks/{tid}/photos/{photo_id}")
+async def task_photo_delete(
+    tid: str,
+    photo_id: str,
+    user: Dict[str, Any] = Depends(current_user_dep),
+):
+    task = await _load_task(tid, user)
+    if not (can_modify_task(user, task) or task.get("assignee_id") == user.get("id")):
+        raise HTTPException(status_code=403, detail="Not allowed")
+    await db.tasks.update_one(
+        {"id": tid},
+        {"$pull": {"photos": {"id": photo_id}}, "$set": {"updated_at": task_now_iso()}},
+    )
+    return {"deleted": True}
+
+
+# Checklist
+
+@api.post("/tasks/{tid}/checklist")
+async def task_checklist_add(
+    tid: str,
+    payload: ChecklistCreate,
+    user: Dict[str, Any] = Depends(current_user_dep),
+):
+    task = await _load_task(tid, user)
+    if not can_modify_task(user, task):
+        raise HTTPException(status_code=403, detail="Only admin/manager can edit checklists")
+    if not payload.text.strip():
+        raise HTTPException(status_code=400, detail="Text is required")
+    item = build_checklist_item(payload.text)
+    await db.tasks.update_one(
+        {"id": tid},
+        {"$push": {"checklist": item}, "$set": {"updated_at": task_now_iso()}},
+    )
+    return item
+
+
+@api.put("/tasks/{tid}/checklist/{item_id}")
+async def task_checklist_update(
+    tid: str,
+    item_id: str,
+    payload: ChecklistUpdate,
+    user: Dict[str, Any] = Depends(current_user_dep),
+):
+    task = await _load_task(tid, user)
+    # Anyone with view rights can toggle done/undone if it's their assigned task; admin/manager always.
+    is_assignee = task.get("assignee_id") == user.get("id")
+    is_mgr = can_modify_task(user, task)
+    if not (is_mgr or is_assignee):
+        raise HTTPException(status_code=403, detail="Not allowed")
+    set_fields: Dict[str, Any] = {"updated_at": task_now_iso()}
+    if payload.done is not None:
+        set_fields["checklist.$[el].done"] = bool(payload.done)
+        if payload.done:
+            set_fields["checklist.$[el].done_at"] = task_now_iso()
+            set_fields["checklist.$[el].done_by"] = user.get("id")
+            set_fields["checklist.$[el].done_by_name"] = user.get("name") or user.get("email", "")
+        else:
+            set_fields["checklist.$[el].done_at"] = None
+            set_fields["checklist.$[el].done_by"] = None
+            set_fields["checklist.$[el].done_by_name"] = None
+    if payload.text is not None:
+        if not is_mgr:
+            raise HTTPException(status_code=403, detail="Only admin/manager can rename checklist items")
+        set_fields["checklist.$[el].text"] = payload.text.strip()
+    res = await db.tasks.update_one(
+        {"id": tid},
+        {"$set": set_fields},
+        array_filters=[{"el.id": item_id}],
+    )
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Checklist item not found")
+    return {"updated": True}
+
+
+@api.delete("/tasks/{tid}/checklist/{item_id}")
+async def task_checklist_delete(
+    tid: str,
+    item_id: str,
+    user: Dict[str, Any] = Depends(current_user_dep),
+):
+    task = await _load_task(tid, user)
+    if not can_modify_task(user, task):
+        raise HTTPException(status_code=403, detail="Only admin/manager can edit checklists")
+    await db.tasks.update_one(
+        {"id": tid},
+        {"$pull": {"checklist": {"id": item_id}}, "$set": {"updated_at": task_now_iso()}},
+    )
+    return {"deleted": True}
+
+
+# Comments
+
+@api.post("/tasks/{tid}/comments")
+async def task_comment_add(
+    tid: str,
+    payload: CommentCreate,
+    user: Dict[str, Any] = Depends(current_user_dep),
+):
+    task = await _load_task(tid, user)  # also enforces visibility
+    if not payload.body.strip():
+        raise HTTPException(status_code=400, detail="Comment cannot be empty")
+    c = build_comment(body=payload.body, user=user)
+    await db.tasks.update_one(
+        {"id": tid},
+        {"$push": {"comments": c}, "$set": {"updated_at": task_now_iso()}},
+    )
+    return c
 
 
 MANAGED_PROPERTIES = [
